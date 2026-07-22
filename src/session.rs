@@ -184,6 +184,14 @@ pub async fn run(
     let mut current_answer = String::new();
     let mut was_paused = false;
 
+    // A forgotten session holds the mic and keeps billing, so it nags every
+    // `reminder_secs` — set to 0 to disable. `interval_at` (not `interval`)
+    // so the first tick lands a full period out, not immediately.
+    let mut reminder = (cfg.reminder_secs > 0).then(|| {
+        let period = std::time::Duration::from_secs(cfg.reminder_secs);
+        tokio::time::interval_at(tokio::time::Instant::now() + period, period)
+    });
+
     loop {
         tokio::select! {
             biased;
@@ -198,6 +206,11 @@ pub async fn run(
                 if !pause.load(Ordering::Relaxed) {
                     let _ = session.send_audio(i16_to_bytes(&chunk).to_vec()).await;
                 }
+            }
+
+            _ = tick_or_pending(&mut reminder) => {
+                let state = if pause.load(Ordering::Relaxed) { "paused" } else { "listening" };
+                notify("gemini-assistant", &format!("Session still open ({state})."));
             }
 
             event = recv_event(&mut events) => {
@@ -258,6 +271,38 @@ pub fn notify(summary: &str, body: &str) {
         .arg(summary)
         .arg(body)
         .spawn();
+}
+
+/// Copy text to the system clipboard via `xclip`. Best-effort — a missing
+/// `xclip` or a dead X11 connection just means no copy happened, not a
+/// reason to fail whatever command triggered it.
+pub fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let Ok(mut child) = Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+}
+
+/// Resolves to `()` on the interval's next tick, or never resolves if there
+/// is no interval — lets a disabled reminder sit as an always-losing branch
+/// in `tokio::select!` instead of needing a separate code path.
+async fn tick_or_pending(interval: &mut Option<tokio::time::Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Load, resample, and silence-trim a WAV file for the `send-clip` command.

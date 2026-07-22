@@ -33,6 +33,10 @@ enum Command {
     Pause,
     /// Print the current session state without changing it.
     Status,
+    /// Print (and copy to the clipboard) the model's most recent answer —
+    /// from the last-modified session, whether it just ended or is still
+    /// running.
+    Last,
     /// Debug utility: send a WAV file straight to the Live API (no mic, no
     /// pidfile) and play back the response.
     SendClip { path: PathBuf },
@@ -45,6 +49,7 @@ fn main() -> Result<()> {
         Command::Toggle => cmd_toggle(),
         Command::Pause => cmd_pause(),
         Command::Status => cmd_status(),
+        Command::Last => cmd_last(),
         Command::SendClip { path } => cmd_send_clip(&path),
     }
 }
@@ -214,6 +219,14 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+fn cmd_last() -> Result<()> {
+    let session = transcript::latest().context("no saved sessions yet")?;
+    let turn = session.turns.last().context("that session has no turns yet")?;
+    println!("{}", turn.answer);
+    session::copy_to_clipboard(&turn.answer);
+    Ok(())
+}
+
 fn cmd_send_clip(path: &Path) -> Result<()> {
     let api_key = config::load_api_key()?;
     let cfg = config::Config::load();
@@ -360,6 +373,7 @@ mod tests {
         assert_eq!(Cli::parse_from(["gemini-assistant", "pause"]).command, Some(Command::Pause));
         assert_eq!(Cli::parse_from(["gemini-assistant", "status"]).command, Some(Command::Status));
         assert_eq!(Cli::parse_from(["gemini-assistant", "toggle"]).command, Some(Command::Toggle));
+        assert_eq!(Cli::parse_from(["gemini-assistant", "last"]).command, Some(Command::Last));
     }
 
     #[test]

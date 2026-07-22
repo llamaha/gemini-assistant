@@ -45,6 +45,24 @@ fn data_dir() -> PathBuf {
     base.join("gemini-assistant").join("sessions")
 }
 
+/// The most recently modified session, if any. Used by the `last` command —
+/// whether a session just ended or one is still running, its file is the one
+/// that was written to most recently (a running session rewrites its file
+/// after every turn).
+pub fn latest() -> Option<Session> {
+    latest_in(&data_dir())
+}
+
+fn latest_in(dir: &std::path::Path) -> Option<Session> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let newest = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?;
+    let text = std::fs::read_to_string(newest.path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 impl Session {
     /// Start a new session record, identified by the current process id so
     /// it never collides with a concurrent session (the pidfile already
@@ -117,5 +135,37 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let loaded: Session = serde_json::from_str(&text).unwrap();
         assert_eq!(loaded, session);
+    }
+
+    #[test]
+    fn latest_in_empty_dir_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(latest_in(dir.path()), None);
+    }
+
+    #[test]
+    fn latest_in_returns_the_most_recently_modified_session() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut older = Session::new(1);
+        older.add_turn("first question".into(), "first answer".into());
+        older.save_in(dir.path()).unwrap();
+
+        // Ensure a distinguishable mtime — same-second writes on some
+        // filesystems would otherwise tie.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let mut newer = Session::new(2);
+        newer.add_turn("second question".into(), "second answer".into());
+        newer.save_in(dir.path()).unwrap();
+
+        assert_eq!(latest_in(dir.path()), Some(newer));
+    }
+
+    #[test]
+    fn latest_in_ignores_non_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("not-a-session.txt"), "junk").unwrap();
+        assert_eq!(latest_in(dir.path()), None);
     }
 }
