@@ -37,9 +37,16 @@ for terminal or manual runs.)
   "google_search": true,
   "reminder_secs": 600,
   "context_window_target_tokens": 16000,
-  "vad_threshold": 400.0
+  "vad_threshold": 400.0,
+  "screenshot_max_edge": 1024,
+  "screenshot_quality": 80
 }
 ```
+
+Screenshots are downscaled to `screenshot_max_edge` on the longest side before
+sending — a real 2560×1440 capture goes from a 594 KB PNG to a 123 KB JPEG,
+which is still ample to read a dialog and much cheaper in tokens and upload
+time. Raise it if fine print ever gets lost.
 
 `reminder_secs: 0` disables the "still open" reminder. Env vars
 (`GEMINI_LIVE_MODEL`, `GEMINI_ASSISTANT_REMINDER_SECS`,
@@ -53,6 +60,7 @@ run. `GEMINI_ASSISTANT_DEBUG=1` prints raw session events to stderr.
 | `gemini-assistant` / `talk` | Start a session if idle; otherwise pause/resume the mic. **Never ends the session** — bind your main hotkey to this. |
 | `gemini-assistant end` | End the session. The only command that does. Bind your second hotkey to this. |
 | `gemini-assistant pause` | Explicit pause/resume toggle. Same effect as `talk` on a running session. |
+| `gemini-assistant look` | Drag out a rectangle and send it to the running session, so she can see what you're looking at. Then just ask about it out loud. `--window` grabs the focused window with no interaction; `--full` grabs the whole desktop. |
 | `gemini-assistant status` | Print `live` / `paused` / `stopped`. |
 | `gemini-assistant last` | Print (and clipboard-copy) the model's most recent answer. Useful for grabbing a command or plan it just gave you. |
 | `gemini-assistant send-clip <wav>` | Diagnostic: send a WAV straight to the API and play back the reply, bypassing the mic/pidfile entirely. Good for checking the key/model/network without a microphone. |
@@ -64,6 +72,7 @@ Command/URL. Bind two:
 
 - Start / pause / resume → `/full/path/to/target/release/gemini-assistant talk`
 - End the session → `/full/path/to/target/release/gemini-assistant end`
+- Show her your screen → `/full/path/to/target/release/gemini-assistant look`
 
 Ending is deliberately on its own key. The first key gets pressed constantly
 and by reflex, so it must never be able to throw away a conversation — a

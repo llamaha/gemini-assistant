@@ -31,6 +31,10 @@ pub struct Config {
     pub reminder_secs: u64,
     pub context_window_target_tokens: u32,
     pub vad_threshold: f64,
+    /// Longest edge of a screenshot sent to the model. Downscaling cuts
+    /// tokens and upload time; 1024 is ample for reading a dialog.
+    pub screenshot_max_edge: u32,
+    pub screenshot_quality: u8,
 }
 
 impl Default for Config {
@@ -43,6 +47,8 @@ impl Default for Config {
             reminder_secs: 600,
             context_window_target_tokens: 16_000,
             vad_threshold: 400.0,
+            screenshot_max_edge: crate::screenshot::DEFAULT_MAX_EDGE,
+            screenshot_quality: crate::screenshot::DEFAULT_QUALITY,
         }
     }
 }

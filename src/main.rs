@@ -1,5 +1,6 @@
 mod audio;
 mod config;
+mod screenshot;
 mod session;
 mod transcript;
 
@@ -34,6 +35,17 @@ enum Command {
     /// Pause/resume the mic without ending the session — conversation
     /// context is kept. Same effect as `talk` on a running session.
     Pause,
+    /// Capture the screen and hand it to the running session, so she can see
+    /// what you're looking at. Then just ask about it out loud.
+    Look {
+        /// Capture the focused window instead of dragging out a rectangle.
+        /// No interaction, and narrower than the whole desktop.
+        #[arg(long, conflicts_with = "full")]
+        window: bool,
+        /// Capture the entire desktop.
+        #[arg(long)]
+        full: bool,
+    },
     /// Print the current session state without changing it.
     Status,
     /// Print (and copy to the clipboard) the model's most recent answer —
@@ -52,6 +64,11 @@ fn main() -> Result<()> {
         Command::Talk => cmd_talk(),
         Command::End => cmd_end(),
         Command::Pause => cmd_pause(),
+        Command::Look { window, full } => cmd_look(match (window, full) {
+            (true, _) => screenshot::Mode::Window,
+            (_, true) => screenshot::Mode::Full,
+            _ => screenshot::Mode::Region,
+        }),
         Command::Status => cmd_status(),
         Command::Last => cmd_last(),
         Command::SendClip { path } => cmd_send_clip(&path),
@@ -203,6 +220,38 @@ fn cmd_talk() -> Result<()> {
     }
 }
 
+/// Capture the screen and hand the frame to the running session.
+///
+/// Signals carry no payload, so the JPEG goes through a file in
+/// `$XDG_RUNTIME_DIR` and `SIGUSR2` just tells the session one is waiting.
+/// Capture happens *before* signalling so the session never wakes to an
+/// empty or half-written frame.
+fn cmd_look(mode: screenshot::Mode) -> Result<()> {
+    let path = pidfile_path();
+    let Some(pid) = find_live_owner(&path, is_alive, is_our_process) else {
+        // Deliberately don't start a session here: capture would race the
+        // several seconds of connection setup, and a region selector popping
+        // up with nothing listening is worse than a clear message.
+        println!("no live session — start one first, then look");
+        return Ok(());
+    };
+
+    let cfg = config::Config::load();
+    let Some(jpeg) = screenshot::capture(mode, cfg.screenshot_max_edge, cfg.screenshot_quality)?
+    else {
+        println!("cancelled");
+        return Ok(());
+    };
+
+    let frame = screenshot::frame_path();
+    screenshot::write_frame(&frame, &jpeg)?;
+    unsafe {
+        libc::kill(pid, libc::SIGUSR2);
+    }
+    println!("sent {} KB frame to session (pid {pid})", jpeg.len() / 1024);
+    Ok(())
+}
+
 /// End the session outright. The only path that terminates a conversation.
 fn cmd_end() -> Result<()> {
     let path = pidfile_path();
@@ -319,9 +368,13 @@ async fn run_session_local(pidfile: PathBuf, pid: u32, api_key: String, cfg: con
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigusr1 = signal(SignalKind::user_defined1())?;
+    let mut sigusr2 = signal(SignalKind::user_defined2())?;
 
     let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // A counter rather than a bool: two `look` commands in a row must each
+    // register, and a `watch` only fires on a *change* of value.
+    let (frame_tx, frame_rx) = tokio::sync::watch::channel(0u64);
 
     let pidfile_for_signals = pidfile.clone();
     tokio::task::spawn_local(async move {
@@ -343,12 +396,17 @@ async fn run_session_local(pidfile: PathBuf, pid: u32, api_key: String, cfg: con
                     let state = if now_paused { PidState::Paused } else { PidState::Live };
                     let _ = write_pidfile(&pidfile_for_signals, pid as i32, state);
                 }
+                _ = sigusr2.recv() => {
+                    // `look` has already written the frame; just nudge the
+                    // session loop to pick it up.
+                    frame_tx.send_modify(|n| *n += 1);
+                }
             }
         }
     });
 
     session::notify("gemini-assistant", "Session started.");
-    let result = session::run(&api_key, &cfg, pause_rx, shutdown_rx, pid).await;
+    let result = session::run(&api_key, &cfg, pause_rx, shutdown_rx, frame_rx, pid).await;
     if let Err(e) = &result {
         eprintln!("session error: {e}");
         let _ = audio::play_chime_blocking(audio::Chime::Error);

@@ -162,6 +162,7 @@ pub async fn run(
     cfg: &Config,
     mut pause: PauseFlag,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut frame: tokio::sync::watch::Receiver<u64>,
     pid: u32,
 ) -> Result<()> {
     let session = connect_session(api_key, cfg).await?;
@@ -214,6 +215,27 @@ pub async fn run(
             // happens to wake us — and pausing has just removed the mic, the
             // main thing that would.
             _ = pause.changed() => {}
+
+            // A `look` command parked a frame and signalled us. It's context,
+            // not a question — the user follows it with their voice — so this
+            // deliberately doesn't prompt for a reply on its own.
+            _ = frame.changed() => {
+                if let Some(jpeg) = crate::screenshot::take_frame(&crate::screenshot::frame_path()) {
+                    let kb = jpeg.len() / 1024;
+                    match session.send_video(jpeg).await {
+                        Ok(()) => {
+                            if debug_enabled() {
+                                eprintln!("(debug) sent {kb} KB frame");
+                            }
+                            notify("gemini-assistant", "Screen shared — ask away.");
+                        }
+                        Err(e) => {
+                            eprintln!("sending frame failed: {e}");
+                            notify("gemini-assistant", &format!("Couldn't share screen: {e}"));
+                        }
+                    }
+                }
+            }
 
             Some(chunk) = async_rx.recv() => {
                 if !*pause.borrow() {
