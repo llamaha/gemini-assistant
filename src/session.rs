@@ -9,8 +9,6 @@
 //! deliberately doesn't own.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use gemini_genai_rs::prelude::{
@@ -142,10 +140,19 @@ pub async fn run_turn(
     })
 }
 
-/// Shared pause flag: `SIGUSR1` in `main.rs` flips this, and the running
-/// session's mic-pump loop reacts to it. `AtomicBool` rather than a channel
-/// because the signal handler needs to set it without `.await`ing anything.
-pub type PauseFlag = Arc<AtomicBool>;
+/// Shared pause state: `SIGUSR1` in `main.rs` flips this, and the running
+/// session's loop reacts to it.
+///
+/// This is a `watch` channel, not an `AtomicBool`, because the loop has to be
+/// *woken* by the change — not merely able to observe it afterwards. Pausing
+/// releases the mic, which removes the steady stream of audio chunks that
+/// otherwise keeps the loop spinning; a paused, silent session then has no
+/// reliable wake source at all. With a bare flag, a resume sat unnoticed until
+/// something unrelated happened to wake the loop (a server event, or the
+/// periodic reminder — so raising `reminder_secs` made resume take that much
+/// longer). `watch::Receiver::changed()` is selectable, so resume now takes
+/// effect immediately and the reminder interval stays purely cosmetic.
+pub type PauseFlag = tokio::sync::watch::Receiver<bool>;
 
 /// Run a full interactive session: open the mic, connect to Gemini, stream
 /// both directions, react to pause/resume, and keep going until `shutdown`
@@ -153,7 +160,7 @@ pub type PauseFlag = Arc<AtomicBool>;
 pub async fn run(
     api_key: &str,
     cfg: &Config,
-    pause: PauseFlag,
+    mut pause: PauseFlag,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     pid: u32,
 ) -> Result<()> {
@@ -202,14 +209,20 @@ pub async fn run(
                 }
             }
 
+            // Wakes the loop so the pause/resume handling below runs promptly.
+            // Without this branch a resume is invisible until something else
+            // happens to wake us — and pausing has just removed the mic, the
+            // main thing that would.
+            _ = pause.changed() => {}
+
             Some(chunk) = async_rx.recv() => {
-                if !pause.load(Ordering::Relaxed) {
+                if !*pause.borrow() {
                     let _ = session.send_audio(i16_to_bytes(&chunk).to_vec()).await;
                 }
             }
 
             _ = tick_or_pending(&mut reminder) => {
-                let state = if pause.load(Ordering::Relaxed) { "paused" } else { "listening" };
+                let state = if *pause.borrow() { "paused" } else { "listening" };
                 notify("gemini-assistant", &format!("Session still open ({state})."));
             }
 
@@ -248,7 +261,7 @@ pub async fn run(
 
         // Pause/resume: drop or rebuild the recorder so the OS mic indicator
         // actually reflects state, not just "samples discarded".
-        let is_paused = pause.load(Ordering::Relaxed);
+        let is_paused = *pause.borrow();
         if is_paused && !was_paused {
             recorder = None;
             notify("gemini-assistant paused", "Mic released.");
@@ -369,9 +382,36 @@ mod tests {
 
     #[test]
     fn pause_flag_defaults_to_unpaused() {
-        let flag: PauseFlag = Arc::new(AtomicBool::new(false));
-        assert!(!flag.load(Ordering::Relaxed));
-        flag.store(true, Ordering::Relaxed);
-        assert!(flag.load(Ordering::Relaxed));
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let rx: PauseFlag = rx;
+        assert!(!*rx.borrow());
+        tx.send(true).unwrap();
+        assert!(*rx.borrow());
+    }
+
+    /// The regression that made resume look broken: a paused session releases
+    /// the mic, so the loop's other wake sources go quiet and it parks in
+    /// `select!`. `changed()` must fire on a pause flip, otherwise resume
+    /// isn't noticed until something unrelated happens to wake the loop —
+    /// which, with a long `reminder_secs`, could be many minutes.
+    #[tokio::test]
+    async fn pause_change_wakes_a_parked_select() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+
+        // Nothing else ready: `changed()` is the only viable branch, standing
+        // in for a paused session with no mic audio and no server events.
+        let woke = tokio::select! {
+            _ = rx.changed() => true,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => false,
+        };
+        assert!(!woke, "must not wake before the flag actually changes");
+
+        tx.send(true).unwrap();
+        let woke = tokio::select! {
+            _ = rx.changed() => true,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => false,
+        };
+        assert!(woke, "flipping pause must wake the loop promptly");
+        assert!(*rx.borrow());
     }
 }

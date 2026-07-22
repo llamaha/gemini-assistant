@@ -35,7 +35,7 @@ for terminal or manual runs.)
   "voice": "Puck",
   "system_instruction": "You are a fast, concise voice assistant...",
   "google_search": true,
-  "reminder_secs": 30,
+  "reminder_secs": 600,
   "context_window_target_tokens": 16000,
   "vad_threshold": 400.0
 }
@@ -50,8 +50,9 @@ run. `GEMINI_ASSISTANT_DEBUG=1` prints raw session events to stderr.
 
 | Command | Behaviour |
 |---|---|
-| `gemini-assistant` / `toggle` | Start a session if idle, end it if one's running. Bind your main hotkey to this. |
-| `gemini-assistant pause` | Toggle mic on/off without ending the session. Context is kept. Bind a second hotkey to this. |
+| `gemini-assistant` / `talk` | Start a session if idle; otherwise pause/resume the mic. **Never ends the session** — bind your main hotkey to this. |
+| `gemini-assistant end` | End the session. The only command that does. Bind your second hotkey to this. |
+| `gemini-assistant pause` | Explicit pause/resume toggle. Same effect as `talk` on a running session. |
 | `gemini-assistant status` | Print `live` / `paused` / `stopped`. |
 | `gemini-assistant last` | Print (and clipboard-copy) the model's most recent answer. Useful for grabbing a command or plan it just gave you. |
 | `gemini-assistant send-clip <wav>` | Diagnostic: send a WAV straight to the API and play back the reply, bypassing the mic/pidfile entirely. Good for checking the key/model/network without a microphone. |
@@ -61,8 +62,13 @@ run. `GEMINI_ASSISTANT_DEBUG=1` prints raw session events to stderr.
 System Settings → Shortcuts → Custom Shortcuts → New → Global Shortcut →
 Command/URL. Bind two:
 
-- Session on/off → `/full/path/to/target/release/gemini-assistant toggle`
-- Pause/resume → `/full/path/to/target/release/gemini-assistant pause`
+- Start / pause / resume → `/full/path/to/target/release/gemini-assistant talk`
+- End the session → `/full/path/to/target/release/gemini-assistant end`
+
+Ending is deliberately on its own key. The first key gets pressed constantly
+and by reflex, so it must never be able to throw away a conversation — a
+mistimed press just toggles the mic. `toggle` still works as an alias for
+`talk`, so an existing binding keeps working with the new (safe) meaning.
 
 ## Verifying it works
 

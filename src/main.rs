@@ -5,8 +5,6 @@ mod transcript;
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,11 +23,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Command {
-    /// Toggle the live session: open one if idle, end it if running. Bind
-    /// the hotkey to this (default if no subcommand given).
-    Toggle,
+    /// Primary hotkey: start a session if idle, otherwise pause/resume the
+    /// mic. Never ends the session — use `end` for that, so a mistimed press
+    /// can't throw away the conversation. (Default if no subcommand given.)
+    #[command(alias = "toggle")]
+    Talk,
+    /// End the live session. Bind the second hotkey to this.
+    #[command(alias = "stop")]
+    End,
     /// Pause/resume the mic without ending the session — conversation
-    /// context is kept. Bind a second hotkey to this.
+    /// context is kept. Same effect as `talk` on a running session.
     Pause,
     /// Print the current session state without changing it.
     Status,
@@ -44,9 +47,10 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Command::Toggle);
+    let command = cli.command.unwrap_or(Command::Talk);
     match command {
-        Command::Toggle => cmd_toggle(),
+        Command::Talk => cmd_talk(),
+        Command::End => cmd_end(),
         Command::Pause => cmd_pause(),
         Command::Status => cmd_status(),
         Command::Last => cmd_last(),
@@ -179,20 +183,39 @@ fn attempt_claim(
 // Commands
 // ---------------------------------------------------------------------------
 
-fn cmd_toggle() -> Result<()> {
+/// Primary hotkey. Starts a session when idle; on a running session it
+/// pauses/resumes rather than ending it. Ending is deliberately a separate
+/// key (`end`) — this one gets pressed often and by reflex, so it must never
+/// be able to discard a conversation.
+fn cmd_talk() -> Result<()> {
     let path = pidfile_path();
     let my_pid = std::process::id() as i32;
 
     match attempt_claim(&path, my_pid, is_alive, is_our_process)? {
         ClaimOutcome::SignaledOwner(owner_pid) => {
             unsafe {
-                libc::kill(owner_pid, libc::SIGTERM);
+                libc::kill(owner_pid, libc::SIGUSR1);
             }
-            println!("stopping session (pid {owner_pid})");
+            println!("toggled pause (pid {owner_pid})");
             Ok(())
         }
         ClaimOutcome::Claimed => run_session_process(path, my_pid as u32),
     }
+}
+
+/// End the session outright. The only path that terminates a conversation.
+fn cmd_end() -> Result<()> {
+    let path = pidfile_path();
+    match find_live_owner(&path, is_alive, is_our_process) {
+        Some(pid) => {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            println!("stopping session (pid {pid})");
+        }
+        None => println!("no live session"),
+    }
+    Ok(())
 }
 
 fn cmd_pause() -> Result<()> {
@@ -297,10 +320,9 @@ async fn run_session_local(pidfile: PathBuf, pid: u32, api_key: String, cfg: con
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
-    let pause: session::PauseFlag = Arc::new(AtomicBool::new(false));
+    let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let pause_for_signals = pause.clone();
     let pidfile_for_signals = pidfile.clone();
     tokio::task::spawn_local(async move {
         loop {
@@ -314,7 +336,10 @@ async fn run_session_local(pidfile: PathBuf, pid: u32, api_key: String, cfg: con
                     break;
                 }
                 _ = sigusr1.recv() => {
-                    let now_paused = !pause_for_signals.fetch_xor(true, Ordering::Relaxed);
+                    let now_paused = !*pause_tx.borrow();
+                    // `send` (not `send_replace`) so the session loop's
+                    // `changed()` branch fires and acts on this immediately.
+                    let _ = pause_tx.send(now_paused);
                     let state = if now_paused { PidState::Paused } else { PidState::Live };
                     let _ = write_pidfile(&pidfile_for_signals, pid as i32, state);
                 }
@@ -323,7 +348,7 @@ async fn run_session_local(pidfile: PathBuf, pid: u32, api_key: String, cfg: con
     });
 
     session::notify("gemini-assistant", "Session started.");
-    let result = session::run(&api_key, &cfg, pause, shutdown_rx, pid).await;
+    let result = session::run(&api_key, &cfg, pause_rx, shutdown_rx, pid).await;
     if let Err(e) = &result {
         eprintln!("session error: {e}");
         let _ = audio::play_chime_blocking(audio::Chime::Error);
@@ -356,10 +381,10 @@ mod tests {
     }
 
     #[test]
-    fn default_command_is_toggle() {
+    fn default_command_is_talk() {
         let cli = Cli::parse_from(["gemini-assistant"]);
         assert_eq!(cli.command, None);
-        assert_eq!(cli.command.unwrap_or(Command::Toggle), Command::Toggle);
+        assert_eq!(cli.command.unwrap_or(Command::Talk), Command::Talk);
     }
 
     #[test]
@@ -372,8 +397,17 @@ mod tests {
     fn pause_and_status_parse() {
         assert_eq!(Cli::parse_from(["gemini-assistant", "pause"]).command, Some(Command::Pause));
         assert_eq!(Cli::parse_from(["gemini-assistant", "status"]).command, Some(Command::Status));
-        assert_eq!(Cli::parse_from(["gemini-assistant", "toggle"]).command, Some(Command::Toggle));
+        assert_eq!(Cli::parse_from(["gemini-assistant", "talk"]).command, Some(Command::Talk));
+        assert_eq!(Cli::parse_from(["gemini-assistant", "end"]).command, Some(Command::End));
         assert_eq!(Cli::parse_from(["gemini-assistant", "last"]).command, Some(Command::Last));
+    }
+
+    /// The old names stay working so an existing hotkey binding doesn't break
+    /// — but `toggle` now means "start or pause", never "end".
+    #[test]
+    fn legacy_aliases_still_parse() {
+        assert_eq!(Cli::parse_from(["gemini-assistant", "toggle"]).command, Some(Command::Talk));
+        assert_eq!(Cli::parse_from(["gemini-assistant", "stop"]).command, Some(Command::End));
     }
 
     #[test]

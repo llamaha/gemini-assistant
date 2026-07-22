@@ -40,7 +40,7 @@ impl Default for Config {
             voice: None,
             system_instruction: DEFAULT_SYSTEM_INSTRUCTION.to_string(),
             google_search: true,
-            reminder_secs: 30,
+            reminder_secs: 600,
             context_window_target_tokens: 16_000,
             vad_threshold: 400.0,
         }
@@ -160,7 +160,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.model, DEFAULT_MODEL);
         assert!(config.google_search);
-        assert_eq!(config.reminder_secs, 30);
+        assert_eq!(config.reminder_secs, 600);
     }
 
     #[test]
