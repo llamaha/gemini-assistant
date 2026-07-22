@@ -31,7 +31,7 @@ for terminal/manual runs.)
 
 ```json
 {
-  "model": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+  "model": "models/gemini-3.1-flash-live-preview",
   "voice": "Puck",
   "system_instruction": "You are a fast, concise voice assistant...",
   "google_search": true,

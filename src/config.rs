@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 
 /// Google renames/rotates preview Live model ids periodically; check
 /// https://ai.google.dev/gemini-api/docs/models if requests start failing.
-/// This exact id was verified working in the prior implementation.
-pub const DEFAULT_MODEL: &str = "models/gemini-2.5-flash-native-audio-preview-12-2025";
+/// Gemini 3.1 Flash Live Preview, current as of 2026-07 — Google's
+/// highest-quality real-time dialogue model, released March 2026.
+pub const DEFAULT_MODEL: &str = "models/gemini-3.1-flash-live-preview";
 
 pub const DEFAULT_SYSTEM_INSTRUCTION: &str =
     "You are a fast, concise voice assistant running from a hotkey. \
