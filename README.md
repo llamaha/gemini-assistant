@@ -1,6 +1,6 @@
 # gemini-assistant
 
-Hotkey-driven, real-time spoken conversation with Gemini Live. No daemon —
+Hotkey-driven, real-time spoken conversation with Gemini Live. No daemon:
 the process exists exactly as long as the session does, so two hotkey
 presses can never race into two live mic sessions.
 
@@ -22,8 +22,8 @@ echo 'GEMINI_API_KEY=your-key-here' > ~/.config/gemini-assistant/env
 chmod 600 ~/.config/gemini-assistant/env
 ```
 
-(Falls back to the `GEMINI_API_KEY` env var if that file is absent — handy
-for terminal/manual runs.)
+(Falls back to the `GEMINI_API_KEY` env var if that file is absent. Handy
+for terminal or manual runs.)
 
 ## Config (optional)
 
@@ -51,8 +51,9 @@ run. `GEMINI_ASSISTANT_DEBUG=1` prints raw session events to stderr.
 | Command | Behaviour |
 |---|---|
 | `gemini-assistant` / `toggle` | Start a session if idle, end it if one's running. Bind your main hotkey to this. |
-| `gemini-assistant pause` | Toggle mic on/off without ending the session — context is kept. Bind a second hotkey to this. |
+| `gemini-assistant pause` | Toggle mic on/off without ending the session. Context is kept. Bind a second hotkey to this. |
 | `gemini-assistant status` | Print `live` / `paused` / `stopped`. |
+| `gemini-assistant last` | Print (and clipboard-copy) the model's most recent answer. Useful for grabbing a command or plan it just gave you. |
 | `gemini-assistant send-clip <wav>` | Diagnostic: send a WAV straight to the API and play back the reply, bypassing the mic/pidfile entirely. Good for checking the key/model/network without a microphone. |
 
 ## KDE hotkeys
@@ -73,6 +74,6 @@ espeak -w /tmp/clip.wav "what's the capital of France"
 ./target/release/gemini-assistant send-clip /tmp/clip.wav
 ```
 
-Full mic/pause/barge-in behavior needs real hardware — headphones
+Full mic/pause/barge-in behavior needs real hardware, headphones
 specifically, since the mic stays live while the model talks, and on
 speakers it can hear (and interrupt) itself.
