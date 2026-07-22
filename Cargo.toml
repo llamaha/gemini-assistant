@@ -1,0 +1,18 @@
+[package]
+name = "gemini-assistant"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gemini-genai-rs = { version = "0.7", default-features = false, features = ["live", "tracing-support"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "time", "sync"] }
+cpal = "0.18"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+hound = "3.5"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
