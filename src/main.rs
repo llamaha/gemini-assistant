@@ -1,3 +1,4 @@
+mod ask;
 mod audio;
 mod config;
 mod screenshot;
@@ -35,6 +36,10 @@ enum Command {
     /// Pause/resume the mic without ending the session — conversation
     /// context is kept. Same effect as `talk` on a running session.
     Pause,
+    /// One-shot spoken question, separate from any live session: press to
+    /// start talking, press again to send. You hear a single answer and it
+    /// disconnects — no session, no kept context. Bind a hotkey to this.
+    Ask,
     /// Capture the screen and hand it to the running session, so she can see
     /// what you're looking at. Then just ask about it out loud.
     Look {
@@ -64,6 +69,7 @@ fn main() -> Result<()> {
         Command::Talk => cmd_talk(),
         Command::End => cmd_end(),
         Command::Pause => cmd_pause(),
+        Command::Ask => cmd_ask(),
         Command::Look { window, full } => cmd_look(match (window, full) {
             (true, _) => screenshot::Mode::Window,
             (_, true) => screenshot::Mode::Full,
@@ -105,6 +111,14 @@ impl PidState {
 fn pidfile_path() -> PathBuf {
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(base).join("gemini-assistant.pid")
+}
+
+/// A separate pidfile from the live session's, so `ask` and a running session
+/// never fight over one lock — they can coexist (though you'd normally use one
+/// or the other), and a stuck `ask` can't block starting a session.
+fn ask_pidfile_path() -> PathBuf {
+    let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(base).join("gemini-assistant-ask.pid")
 }
 
 /// `<pid>\n<state>\n` — a bare pid with no second line is treated as `Live`
@@ -217,6 +231,25 @@ fn cmd_talk() -> Result<()> {
             Ok(())
         }
         ClaimOutcome::Claimed => run_session_process(path, my_pid as u32),
+    }
+}
+
+/// One-shot spoken question. First press claims the ask-pidfile and becomes
+/// the recorder; second press finds that recorder and `SIGUSR1`s it to commit
+/// the turn. Mirrors `talk`'s claim-or-signal shape but on its own pidfile.
+fn cmd_ask() -> Result<()> {
+    let path = ask_pidfile_path();
+    let my_pid = std::process::id() as i32;
+
+    match attempt_claim(&path, my_pid, is_alive, is_our_process)? {
+        ClaimOutcome::SignaledOwner(owner_pid) => {
+            unsafe {
+                libc::kill(owner_pid, libc::SIGUSR1);
+            }
+            println!("sending question (pid {owner_pid})");
+            Ok(())
+        }
+        ClaimOutcome::Claimed => run_ask_process(path),
     }
 }
 
@@ -415,6 +448,53 @@ async fn run_session_local(pidfile: PathBuf, pid: u32, api_key: String, cfg: con
         session::notify("gemini-assistant", "Session ended.");
     }
     result
+}
+
+/// Become the one-shot ask recorder. Same pidfile-guarded,
+/// `current_thread` + `LocalSet` shape as the session (for the non-`Send`
+/// `cpal::Stream`), but the only signal that matters is `SIGUSR1` = "send the
+/// question", and the process exits after a single answer.
+fn run_ask_process(pidfile: PathBuf) -> Result<()> {
+    let _guard = PidfileGuard(pidfile);
+    let result = try_run_ask_process();
+    if let Err(e) = &result {
+        eprintln!("ask failed: {e}");
+        let _ = audio::play_chime_blocking(audio::Chime::Error);
+        session::notify("gemini-assistant ask failed", &e.to_string());
+    }
+    result
+}
+
+fn try_run_ask_process() -> Result<()> {
+    let api_key = config::load_api_key()?;
+    let cfg = config::Config::load();
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, run_ask_local(api_key, cfg))
+}
+
+async fn run_ask_local(api_key: String, cfg: config::Config) -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigusr1 = signal(SignalKind::user_defined1())?;
+
+    // Flips true on the second press (SIGUSR1) to commit the turn; SIGTERM/
+    // SIGINT flip it too so a kill still finalises cleanly rather than leaving
+    // the mic open.
+    let (send_tx, send_rx) = tokio::sync::watch::channel(false);
+    tokio::task::spawn_local(async move {
+        tokio::select! {
+            _ = sigusr1.recv() => {}
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+        let _ = send_tx.send(true);
+    });
+
+    ask::run(&api_key, &cfg, send_rx, cfg.ask_max_secs).await
 }
 
 #[cfg(test)]

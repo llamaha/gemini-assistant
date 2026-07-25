@@ -35,6 +35,10 @@ pub struct Config {
     /// tokens and upload time; 1024 is ample for reading a dialog.
     pub screenshot_max_edge: u32,
     pub screenshot_quality: u8,
+    /// Safety cap on a one-shot `ask` recording: if the second press never
+    /// comes, the question is sent anyway after this many seconds so a
+    /// forgotten mic can't stream forever.
+    pub ask_max_secs: u64,
 }
 
 impl Default for Config {
@@ -49,6 +53,7 @@ impl Default for Config {
             vad_threshold: 400.0,
             screenshot_max_edge: crate::screenshot::DEFAULT_MAX_EDGE,
             screenshot_quality: crate::screenshot::DEFAULT_QUALITY,
+            ask_max_secs: 60,
         }
     }
 }

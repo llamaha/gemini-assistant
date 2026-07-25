@@ -39,7 +39,8 @@ for terminal or manual runs.)
   "context_window_target_tokens": 16000,
   "vad_threshold": 400.0,
   "screenshot_max_edge": 1024,
-  "screenshot_quality": 80
+  "screenshot_quality": 80,
+  "ask_max_secs": 60
 }
 ```
 
@@ -60,6 +61,7 @@ run. `GEMINI_ASSISTANT_DEBUG=1` prints raw session events to stderr.
 | `gemini-assistant` / `talk` | Start a session if idle; otherwise pause/resume the mic. **Never ends the session** — bind your main hotkey to this. |
 | `gemini-assistant end` | End the session. The only command that does. Bind your second hotkey to this. |
 | `gemini-assistant pause` | Explicit pause/resume toggle. Same effect as `talk` on a running session. |
+| `gemini-assistant ask` | One-shot spoken question, separate from any session: press to start talking, press again to send, hear a single answer, done. No session, no kept context. |
 | `gemini-assistant look` | Drag out a rectangle and send it to the running session, so she can see what you're looking at. Then just ask about it out loud. `--window` grabs the focused window with no interaction; `--full` grabs the whole desktop. |
 | `gemini-assistant status` | Print `live` / `paused` / `stopped`. |
 | `gemini-assistant last` | Print (and clipboard-copy) the model's most recent answer. Useful for grabbing a command or plan it just gave you. |
@@ -76,6 +78,7 @@ whatever you like):
 | **Meta+F1** | `…/gemini-assistant talk` | Start a session; on a running one, pause/resume the mic |
 | **Meta+F2** | `…/gemini-assistant end` | End the session |
 | **Meta+F3** | `…/gemini-assistant look` | Drag a rectangle and show it to her |
+| **Meta+F4** | `…/gemini-assistant ask` | One-shot spoken question (press to talk, press to send) |
 
 Ending is deliberately on its own key. The first key gets pressed constantly
 and by reflex, so it must never be able to throw away a conversation — a
@@ -89,6 +92,20 @@ and it's captured and sent into the session as an image. The screenshot is
 Send it, then just ask about it out loud ("what's this error mean?"). Use
 `look --window` for the focused window with no dragging, or `look --full` for
 the whole desktop.
+
+**One-shot question (Meta+F4):** for a quick question when you don't want a
+whole session. Press F4 to start talking, press again to send; you hear one
+spoken answer and it disconnects — nothing kept. Unlike a session, it turns
+off server-side voice detection and marks the turn boundaries explicitly
+(`activityStart`/`activityEnd`), so the model answers the instant you press
+send rather than waiting to guess you've paused. It's independent of a live
+session (its own pidfile), and if you never press send a second time the
+question is committed automatically after `ask_max_secs` (default 60) so the
+mic can't stay open indefinitely.
+
+Note this runs the **live** model (it speaks the answer), not the text-only
+`gemini-3.6-flash`. The non-Live API returns text, not speech, so a spoken
+one-shot necessarily uses the live model.
 
 ## Verifying it works
 
