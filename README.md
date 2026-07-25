@@ -68,16 +68,27 @@ run. `GEMINI_ASSISTANT_DEBUG=1` prints raw session events to stderr.
 ## KDE hotkeys
 
 System Settings → Shortcuts → Custom Shortcuts → New → Global Shortcut →
-Command/URL. Bind two:
+Command/URL. Three shortcuts (the keys below are what this setup uses — pick
+whatever you like):
 
-- Start / pause / resume → `/full/path/to/target/release/gemini-assistant talk`
-- End the session → `/full/path/to/target/release/gemini-assistant end`
-- Show her your screen → `/full/path/to/target/release/gemini-assistant look`
+| Key | Command | Does |
+|---|---|---|
+| **Meta+F1** | `…/gemini-assistant talk` | Start a session; on a running one, pause/resume the mic |
+| **Meta+F2** | `…/gemini-assistant end` | End the session |
+| **Meta+F3** | `…/gemini-assistant look` | Drag a rectangle and show it to her |
 
 Ending is deliberately on its own key. The first key gets pressed constantly
 and by reflex, so it must never be able to throw away a conversation — a
 mistimed press just toggles the mic. `toggle` still works as an alias for
 `talk`, so an existing binding keeps working with the new (safe) meaning.
+
+**Showing her your screen (Meta+F3):** a session must already be running
+(Meta+F1). Press F3, drag a rectangle around whatever you want her to see,
+and it's captured and sent into the session as an image. The screenshot is
+*context, not a question* — sending it doesn't prompt a reply on its own.
+Send it, then just ask about it out loud ("what's this error mean?"). Use
+`look --window` for the focused window with no dragging, or `look --full` for
+the whole desktop.
 
 ## Verifying it works
 
