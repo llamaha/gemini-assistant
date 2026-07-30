@@ -49,6 +49,14 @@ sending — a real 2560×1440 capture goes from a 594 KB PNG to a 123 KB JPEG,
 which is still ample to read a dialog and much cheaper in tokens and upload
 time. Raise it if fine print ever gets lost.
 
+A session stays alive indefinitely. The Live API recycles the underlying
+connection on a timer (roughly every 10–15 minutes) regardless of activity —
+so pausing doesn't stave it off — but the assistant captures the server's
+session-resumption handle and transparently reconnects with it when that
+happens, carrying the conversation across the recycle. You may hear a brief gap
+mid-session; it keeps going. Only `end` (Meta+F2) actually stops it. If the
+network is genuinely down, it retries a few times with backoff and then ends.
+
 `reminder_secs: 0` disables the "still open" reminder. Env vars
 (`GEMINI_LIVE_MODEL`, `GEMINI_ASSISTANT_REMINDER_SECS`,
 `GEMINI_ASSISTANT_VAD_THRESHOLD`) override individual fields for a one-off

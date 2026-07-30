@@ -46,8 +46,16 @@ pub fn build_session_config(api_key: &str, cfg: &Config) -> SessionConfig {
     config
 }
 
-async fn connect_session(api_key: &str, cfg: &Config) -> Result<SessionHandle> {
-    let config = build_session_config(api_key, cfg);
+/// Connect a live session. `resume_handle` enables session resumption:
+/// `None` starts fresh (but still asks the server to issue resumption handles);
+/// `Some(handle)` resumes the conversation that handle belongs to, which is how
+/// we survive the server recycling the connection.
+async fn connect_session(
+    api_key: &str,
+    cfg: &Config,
+    resume_handle: Option<String>,
+) -> Result<SessionHandle> {
+    let config = build_session_config(api_key, cfg).session_resumption(resume_handle);
     let session = connect(config, TransportConfig::default())
         .await
         .context("connecting to Gemini Live")?;
@@ -58,6 +66,36 @@ async fn connect_session(api_key: &str, cfg: &Config) -> Result<SessionHandle> {
     .await
     .context("timed out waiting for session to become active")?;
     Ok(session)
+}
+
+/// Reconnect a live session that the server recycled, resuming its prior
+/// context via `handle`. Bounded exponential backoff so a genuinely-down
+/// network gives up instead of spinning; returns `None` when every attempt
+/// failed.
+async fn reconnect_session(
+    api_key: &str,
+    cfg: &Config,
+    handle: Option<String>,
+) -> Option<SessionHandle> {
+    const MAX_ATTEMPTS: u32 = 5;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match connect_session(api_key, cfg, handle.clone()).await {
+            Ok(session) => {
+                if debug_enabled() {
+                    eprintln!("(debug) reconnected (attempt {attempt})");
+                }
+                return Some(session);
+            }
+            Err(e) => {
+                eprintln!("reconnect attempt {attempt}/{MAX_ATTEMPTS} failed: {e}");
+                if attempt < MAX_ATTEMPTS {
+                    let secs = 1u64 << (attempt - 1); // 1, 2, 4, 8s
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Result of a single one-shot turn (`send-clip`): what the model said back,
@@ -77,7 +115,7 @@ pub async fn run_turn(
     samples: &[i16],
     mut on_audio_chunk: impl FnMut(&[i16]),
 ) -> Result<TurnResult> {
-    let session = connect_session(api_key, cfg).await?;
+    let session = connect_session(api_key, cfg, None).await?;
 
     // A one-shot send has no open mic to keep streaming ambient silence
     // after the clip ends, so the server's voice-activity detector has
@@ -165,7 +203,8 @@ pub async fn run(
     mut frame: tokio::sync::watch::Receiver<u64>,
     pid: u32,
 ) -> Result<()> {
-    let session = connect_session(api_key, cfg).await?;
+    // Everything that must survive a reconnect lives out here; only the
+    // `session`/`events` pair is rebuilt when the server recycles the socket.
     let mut record = transcript::Session::new(pid);
 
     let player = Player::new().context("opening speaker")?;
@@ -187,11 +226,6 @@ pub async fn run(
         }
     });
 
-    let mut events = session.subscribe();
-    let mut current_question = String::new();
-    let mut current_answer = String::new();
-    let mut was_paused = false;
-
     // A forgotten session holds the mic and keeps billing, so it nags every
     // `reminder_secs` — set to 0 to disable. `interval_at` (not `interval`)
     // so the first tick lands a full period out, not immediately.
@@ -200,98 +234,153 @@ pub async fn run(
         tokio::time::interval_at(tokio::time::Instant::now() + period, period)
     });
 
-    loop {
-        tokio::select! {
-            biased;
+    let mut was_paused = false;
 
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
+    // The Live API caps how long a single connection stays open regardless of
+    // activity: near the limit the server sends `GoAway` and drops the socket.
+    // We keep the latest resumption handle and reconnect with it, so the
+    // conversation continues across that recycle instead of ending. `None` on
+    // the first connect enables resumption and starts fresh.
+    let mut resume_handle: Option<String> = None;
+    let mut session = connect_session(api_key, cfg, None).await?;
+    let mut connected_at = tokio::time::Instant::now();
+    let mut flaps: u32 = 0;
+
+    'session: loop {
+        let mut events = session.subscribe();
+        let mut current_question = String::new();
+        let mut current_answer = String::new();
+
+        // Inner loop drives one connection. It yields `true` to reconnect (the
+        // socket was recycled) or `false` to end the session (shutdown, or a
+        // fatal error).
+        let reconnect = loop {
+            tokio::select! {
+                biased;
+
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break false;
+                    }
                 }
-            }
 
-            // Wakes the loop so the pause/resume handling below runs promptly.
-            // Without this branch a resume is invisible until something else
-            // happens to wake us — and pausing has just removed the mic, the
-            // main thing that would.
-            _ = pause.changed() => {}
+                // Wakes the loop so the pause/resume handling below runs promptly.
+                // Without this branch a resume is invisible until something else
+                // happens to wake us — and pausing has just removed the mic, the
+                // main thing that would.
+                _ = pause.changed() => {}
 
-            // A `look` command parked a frame and signalled us. It's context,
-            // not a question — the user follows it with their voice — so this
-            // deliberately doesn't prompt for a reply on its own.
-            _ = frame.changed() => {
-                if let Some(jpeg) = crate::screenshot::take_frame(&crate::screenshot::frame_path()) {
-                    let kb = jpeg.len() / 1024;
-                    match session.send_video(jpeg).await {
-                        Ok(()) => {
-                            if debug_enabled() {
-                                eprintln!("(debug) sent {kb} KB frame");
+                // A `look` command parked a frame and signalled us. It's context,
+                // not a question — the user follows it with their voice — so this
+                // deliberately doesn't prompt for a reply on its own.
+                _ = frame.changed() => {
+                    if let Some(jpeg) = crate::screenshot::take_frame(&crate::screenshot::frame_path()) {
+                        let kb = jpeg.len() / 1024;
+                        match session.send_video(jpeg).await {
+                            Ok(()) => {
+                                if debug_enabled() {
+                                    eprintln!("(debug) sent {kb} KB frame");
+                                }
+                                notify("gemini-assistant", "Screen shared — ask away.");
                             }
-                            notify("gemini-assistant", "Screen shared — ask away.");
+                            Err(e) => {
+                                eprintln!("sending frame failed: {e}");
+                                notify("gemini-assistant", &format!("Couldn't share screen: {e}"));
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("sending frame failed: {e}");
-                            notify("gemini-assistant", &format!("Couldn't share screen: {e}"));
+                    }
+                }
+
+                Some(chunk) = async_rx.recv() => {
+                    if !*pause.borrow() {
+                        let _ = session.send_audio(i16_to_bytes(&chunk).to_vec()).await;
+                    }
+                }
+
+                _ = tick_or_pending(&mut reminder) => {
+                    let state = if *pause.borrow() { "paused" } else { "listening" };
+                    notify("gemini-assistant", &format!("Session still open ({state})."));
+                }
+
+                event = recv_event(&mut events) => {
+                    let Some(event) = event else { break true }; // channel closed → reconnect
+                    if debug_enabled() {
+                        eprintln!("(debug) event: {event:?}");
+                    }
+                    match event {
+                        SessionEvent::AudioData(bytes) => {
+                            if let Some(samples) = bytes_to_i16(&bytes) {
+                                player.push_pcm16(samples, audio::OUTPUT_SAMPLE_RATE);
+                            }
                         }
+                        SessionEvent::Interrupted => player.clear(),
+                        SessionEvent::InputTranscription(t) => current_question.push_str(&t),
+                        SessionEvent::OutputTranscription(t) => current_answer.push_str(&t),
+                        SessionEvent::TurnComplete => {
+                            if !current_question.is_empty() || !current_answer.is_empty() {
+                                record.add_turn(
+                                    std::mem::take(&mut current_question),
+                                    std::mem::take(&mut current_answer),
+                                );
+                                let _ = record.save();
+                            }
+                        }
+                        // Keep the freshest handle; it's what lets a reconnect
+                        // resume this exact conversation.
+                        SessionEvent::SessionResumeUpdate(info) => {
+                            resume_handle = Some(info.handle);
+                        }
+                        // The connection is being recycled, not the conversation
+                        // — reconnect with the handle rather than ending.
+                        SessionEvent::GoAway(_) | SessionEvent::Disconnected(_) => break true,
+                        SessionEvent::Error(e) => {
+                            eprintln!("session error: {e}");
+                            break false;
+                        }
+                        _ => {}
                     }
                 }
             }
 
-            Some(chunk) = async_rx.recv() => {
-                if !*pause.borrow() {
-                    let _ = session.send_audio(i16_to_bytes(&chunk).to_vec()).await;
-                }
+            // Pause/resume: drop or rebuild the recorder so the OS mic indicator
+            // actually reflects state, not just "samples discarded".
+            let is_paused = *pause.borrow();
+            if is_paused && !was_paused {
+                recorder = None;
+                notify("gemini-assistant paused", "Mic released.");
+            } else if !is_paused && was_paused {
+                recorder = Some(StreamingRecorder::start(mic_tx.clone()).context("reopening mic")?);
+                notify("gemini-assistant resumed", "Mic live.");
             }
+            was_paused = is_paused;
+        };
 
-            _ = tick_or_pending(&mut reminder) => {
-                let state = if *pause.borrow() { "paused" } else { "listening" };
-                notify("gemini-assistant", &format!("Session still open ({state})."));
-            }
-
-            event = recv_event(&mut events) => {
-                let Some(event) = event else { break };
-                if debug_enabled() {
-                    eprintln!("(debug) event: {event:?}");
-                }
-                match event {
-                    SessionEvent::AudioData(bytes) => {
-                        if let Some(samples) = bytes_to_i16(&bytes) {
-                            player.push_pcm16(samples, audio::OUTPUT_SAMPLE_RATE);
-                        }
-                    }
-                    SessionEvent::Interrupted => player.clear(),
-                    SessionEvent::InputTranscription(t) => current_question.push_str(&t),
-                    SessionEvent::OutputTranscription(t) => current_answer.push_str(&t),
-                    SessionEvent::TurnComplete => {
-                        if !current_question.is_empty() || !current_answer.is_empty() {
-                            record.add_turn(
-                                std::mem::take(&mut current_question),
-                                std::mem::take(&mut current_answer),
-                            );
-                            let _ = record.save();
-                        }
-                    }
-                    SessionEvent::GoAway(_) | SessionEvent::Disconnected(_) => break,
-                    SessionEvent::Error(e) => {
-                        eprintln!("session error: {e}");
-                        break;
-                    }
-                    _ => {}
-                }
-            }
+        if !reconnect {
+            break 'session;
         }
 
-        // Pause/resume: drop or rebuild the recorder so the OS mic indicator
-        // actually reflects state, not just "samples discarded".
-        let is_paused = *pause.borrow();
-        if is_paused && !was_paused {
-            recorder = None;
-            notify("gemini-assistant paused", "Mic released.");
-        } else if !is_paused && was_paused {
-            recorder = Some(StreamingRecorder::start(mic_tx.clone()).context("reopening mic")?);
-            notify("gemini-assistant resumed", "Mic live.");
+        // Guard against a wedged reconnect loop — e.g. a rejected handle that
+        // makes the server drop us right after connecting. A healthy session
+        // runs for many minutes before a recycle; several sub-30s connections
+        // in a row means reconnecting isn't working, so stop.
+        const MIN_HEALTHY: std::time::Duration = std::time::Duration::from_secs(30);
+        flaps = if connected_at.elapsed() < MIN_HEALTHY { flaps + 1 } else { 0 };
+        if flaps >= 3 {
+            notify("gemini-assistant", "Session kept dropping — ending.");
+            break 'session;
         }
-        was_paused = is_paused;
+
+        let _ = session.disconnect().await;
+        match reconnect_session(api_key, cfg, resume_handle.clone()).await {
+            Some(new_session) => {
+                session = new_session;
+                connected_at = tokio::time::Instant::now();
+            }
+            None => {
+                notify("gemini-assistant", "Lost connection and couldn't reconnect.");
+                break 'session;
+            }
+        }
     }
 
     drop(recorder);
